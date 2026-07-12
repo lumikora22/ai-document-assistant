@@ -112,7 +112,7 @@ All variables are documented in [.env.example](.env.example).
 | --- | --- |
 | DATABASE_URL | PostgreSQL connection string |
 | OPENROUTER_API_KEY | OpenRouter key; required for chat, not for indexing |
-| OPENROUTER_MODEL | Chat model (default `deepseek/deepseek-chat-v3-0324:free`) |
+| OPENROUTER_MODEL | Chat model (default `openai/gpt-oss-120b:free`) |
 | PORT | API port (default 3001) |
 | CORS_ORIGIN | Allowed frontend origin |
 | NEXT_PUBLIC_API_URL | API base URL used by the frontend |

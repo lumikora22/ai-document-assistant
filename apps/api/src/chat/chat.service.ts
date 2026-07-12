@@ -14,7 +14,7 @@ import { toSqlVector } from '../shared/vector';
 import { buildRagMessages, ChatCompletionMessage, ChatHistoryMessage, RetrievedChunk } from './prompt';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const DEFAULT_MODEL = 'deepseek/deepseek-chat-v3-0324:free';
+const DEFAULT_MODEL = 'openai/gpt-oss-120b:free';
 const TOP_K = 5;
 
 export interface ChatSource {
