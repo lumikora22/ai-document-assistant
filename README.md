@@ -127,7 +127,7 @@ Unit tests cover the two pure cores of the RAG pipeline: the chunking algorithm 
 
 ## Troubleshooting
 
-- **pdf-parse throws `ENOENT ... test/data/...` at startup.** The package root entry runs a debug self-test in some environments. This project imports `pdf-parse/lib/pdf-parse.js` directly, which avoids that code path. Keep the pinned version `1.1.1`.
+- **A valid PDF is rejected with `The PDF could not be parsed`.** Old `pdf-parse` 1.x bundles a 2018 build of pdf.js that fails on PDFs produced by modern generators (`bad XRef entry`). This project uses `pdf-parse` v2, which ships a current pdf.js and native per-page text extraction.
 - **First upload is slow or appears stuck.** The embedding model is downloaded on first use (about 25 MB) and cached. Subsequent uploads are fast.
 - **`@xenova/transformers` import errors in a CommonJS build.** The package is ESM-only. The API loads it through a true dynamic import (see `EmbeddingsService`) instead of a transpiled `require`.
 - **Chat returns 503.** `OPENROUTER_API_KEY` is missing. Set it in `.env` and restart the API.
