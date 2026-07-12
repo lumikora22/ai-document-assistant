@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Builds
+dist/
+.next/
+out/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Model cache (downloaded at runtime by @xenova/transformers)
+.cache/
+apps/api/models/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

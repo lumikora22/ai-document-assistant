@@ -1,0 +1,15 @@
+{
+  "name": "ai-document-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RAG-based document assistant: upload PDFs, index them with local embeddings, and chat about their content with streamed answers and source citations.",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspace=apps/api",
+    "dev:api": "npm run start:dev --workspace=apps/api",
+    "dev:web": "npm run dev --workspace=apps/web"
+  }
+}
