@@ -33,7 +33,7 @@ export function SourceList({ sources }: SourceListProps) {
                 <span>
                   Excerpt {index + 1} &middot; page {source.page}
                 </span>
-                <span>{(source.similarity * 100).toFixed(0)}% match</span>
+                <span>{Math.max(0, Math.min(1, source.similarity) * 100).toFixed(0)}% match</span>
               </div>
               <p className="line-clamp-4 break-words">{source.content}</p>
             </li>

@@ -2,6 +2,8 @@
 
 A retrieval-augmented generation (RAG) application. Upload a PDF, let the API index it with locally generated embeddings, and chat with an AI about its content. Answers stream in real time and cite the document pages they were grounded on.
 
+![AI Document Assistant demo: uploading a PDF and chatting with streamed, source-cited answers](docs/demo.gif)
+
 ## What this project demonstrates
 
 - A complete RAG pipeline: PDF parsing, chunking with overlap, embedding, vector retrieval, prompt construction, and grounded generation.
