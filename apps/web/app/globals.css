@@ -60,3 +60,18 @@ body {
   margin: 0.5rem 0;
   opacity: 0.85;
 }
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-dialog-in {
+  animation: dialog-in 180ms ease-out;
+}

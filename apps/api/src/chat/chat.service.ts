@@ -1,153 +1,160 @@
-import {
-  Inject,
-  Injectable,
-  Logger,
-  NotFoundException,
-  ServiceUnavailableException,
-  UnauthorizedException,
-} from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { Pool } from 'pg';
-import { PG_POOL } from '../database/database.module';
+import { Inject, Injectable } from '@nestjs/common';
+import { cosineDistance, eq, sql } from 'drizzle-orm';
+import { AnalystAgent } from '../agents/analyst.agent';
+import { ConversationAgent } from '../agents/conversation.agent';
+import { Database, DRIZZLE } from '../database/database.module';
+import { noteChunks } from '../database/schema';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
-import { toSqlVector } from '../shared/vector';
-import { buildRagMessages, ChatCompletionMessage, ChatHistoryMessage, RetrievedChunk } from './prompt';
+import { OpenRouterService } from '../llm/openrouter.service';
+import { MemoryService } from '../memory/memory.service';
+import { NotesService } from '../notes/notes.service';
+import { StreamingOutputGuard } from '../security/output-guard';
+import { dropNearDuplicates } from '../security/retrieval-guard';
+import { SecurityService } from '../security/security.service';
+import { RetrievedChunk } from './prompt';
 
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const DEFAULT_MODEL = 'openai/gpt-oss-120b:free';
 const TOP_K = 5;
+/** Candidatos buscados no pgvector antes de descartar os quase duplicados. */
+const CANDIDATES = TOP_K * 4;
+const MAX_HISTORY_MESSAGES = 10;
+/** Perguntas anteriores que o analista recebe para entender perguntas de continuação. */
+const ANALYST_PREVIOUS_QUESTIONS = 2;
+const LEAK_NOTICE = '\n\n[Resposta interrompida: ela estava expondo as instruções internas do assistente.]';
 
 export interface ChatSource {
   id: string;
-  page: number;
   content: string;
   similarity: number;
 }
 
 export interface ChatStream {
+  /** Conversation the messages were saved to; the client sends it back to continue it. */
+  conversationId: string;
   sources: ChatSource[];
   tokens: AsyncGenerator<string>;
 }
 
 @Injectable()
 export class ChatService {
-  private readonly logger = new Logger(ChatService.name);
-
   constructor(
-    @Inject(PG_POOL) private readonly pool: Pool,
+    @Inject(DRIZZLE) private readonly db: Database,
     private readonly embeddings: EmbeddingsService,
-    private readonly config: ConfigService,
+    private readonly notes: NotesService,
+    private readonly memory: MemoryService,
+    private readonly llm: OpenRouterService,
+    private readonly security: SecurityService,
+    private readonly analyst: AnalystAgent,
+    private readonly conversation: ConversationAgent,
   ) {}
 
   /**
-   * Runs the full RAG flow: embed the question, retrieve the most similar
-   * chunks with pgvector, build the prompt, and stream the completion.
+   * Runs the two-agent RAG flow: embed the question, retrieve the most
+   * similar chunks and earlier memories with pgvector plus the related
+   * relations of the entity graph, let the analyst agent (cheap model) turn
+   * all of it into a short report, and stream the conversation agent's answer
+   * (main model) built from that report. The exchange is saved and turned
+   * into memory afterwards.
    */
-  async ask(documentId: string, message: string, history: ChatHistoryMessage[]): Promise<ChatStream> {
-    const apiKey = this.config.get<string>('OPENROUTER_API_KEY');
-    if (!apiKey) {
-      throw new ServiceUnavailableException(
-        'OPENROUTER_API_KEY is not configured. Set it in the .env file to enable chat.',
-      );
-    }
+  async ask(noteId: string, rawMessage: string, conversationId?: string): Promise<ChatStream> {
+    this.llm.assertConfigured();
+    const note = await this.notes.findOne(noteId);
+    // Bloqueia injeção direta antes de gravar ou gastar qualquer coisa com a mensagem.
+    const message = await this.security.inspectUserMessage(rawMessage, noteId);
+    const conversation = await this.memory.ensureConversation(noteId, conversationId);
 
-    await this.assertDocumentExists(documentId);
+    // O histórico vem do banco, não do cliente, que poderia forjar falas do assistente.
+    const history = await this.memory.recentMessages(conversation, MAX_HISTORY_MESSAGES);
+    const questionVector = await this.embeddings.embedOne(message);
+    const [retrieved, memories] = await Promise.all([
+      this.retrieveChunks(noteId, questionVector),
+      this.memory.findRelevantMemories(noteId, questionVector, conversation),
+    ]);
+    const chunks = retrieved.map((chunk) => ({ ...chunk, suspicious: this.security.isSuspicious(chunk.content) }));
+    await this.memory.addMessage(conversation, 'user', message);
+    await this.memory.recordRagQuery(noteId, conversation, message, chunks);
 
-    const chunks = await this.retrieveChunks(documentId, message);
-    const messages = buildRagMessages(message, chunks, history);
-    const tokens = this.streamCompletion(apiKey, messages);
+    const relations = await this.memory.findRelatedRelations(
+      noteId,
+      [message, ...chunks.map((chunk) => chunk.content)].join('\n'),
+    );
+    const previousQuestions = history
+      .filter((m) => m.role === 'user')
+      .slice(-ANALYST_PREVIOUS_QUESTIONS)
+      .map((m) => m.content);
+
+    const analysis = await this.analyst.analyze(
+      { question: message, note, chunks, memories, relations, previousQuestions },
+      noteId,
+    );
+    const { tokens, guard } = await this.conversation.respond(
+      { question: message, note, history, analysis, chunks, memories },
+      noteId,
+    );
 
     return {
+      conversationId: conversation,
       sources: chunks.map((chunk) => ({
         id: chunk.id,
-        page: chunk.page,
         content: chunk.content,
         similarity: chunk.similarity,
       })),
-      tokens,
+      tokens: this.guardAndSave(noteId, conversation, tokens, guard),
     };
   }
 
-  private async assertDocumentExists(documentId: string): Promise<void> {
-    const result = await this.pool.query('SELECT 1 FROM documents WHERE id = $1', [documentId]);
-    if (result.rowCount === 0) {
-      throw new NotFoundException(`Document ${documentId} was not found`);
-    }
-  }
-
-  private async retrieveChunks(documentId: string, question: string): Promise<RetrievedChunk[]> {
-    const questionVector = await this.embeddings.embedOne(question);
-    const result = await this.pool.query<{
-      id: string;
-      content: string;
-      page: number;
-      similarity: number;
-    }>(
-      `SELECT id, content, page, 1 - (embedding <=> $1::vector) AS similarity
-       FROM chunks
-       WHERE document_id = $2
-       ORDER BY embedding <=> $1::vector
-       LIMIT $3`,
-      [toSqlVector(questionVector), documentId, TOP_K],
-    );
-    return result.rows.map((row) => ({ ...row, similarity: Number(row.similarity) }));
-  }
-
-  private async *streamCompletion(
-    apiKey: string,
-    messages: ChatCompletionMessage[],
+  /**
+   * Passes the tokens through the output guard, then stores what the user
+   * actually saw and refreshes the memory. A leaked answer is cut off and
+   * never reaches the history or the memory.
+   */
+  private async *guardAndSave(
+    noteId: string,
+    conversationId: string,
+    tokens: AsyncGenerator<string>,
+    guard: StreamingOutputGuard,
   ): AsyncGenerator<string> {
-    const model = this.config.get<string>('OPENROUTER_MODEL', DEFAULT_MODEL);
-
-    const response = await fetch(OPENROUTER_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ model, messages, stream: true }),
-    });
-
-    if (response.status === 401 || response.status === 403) {
-      throw new UnauthorizedException('OpenRouter rejected the API key. Check OPENROUTER_API_KEY.');
-    }
-    if (!response.ok || !response.body) {
-      const detail = await response.text().catch(() => '');
-      this.logger.error(`OpenRouter request failed (${response.status}): ${detail}`);
-      throw new ServiceUnavailableException(`OpenRouter request failed with status ${response.status}`);
-    }
-
-    const decoder = new TextDecoder();
-    let buffered = '';
-
-    for await (const value of response.body as unknown as AsyncIterable<Uint8Array>) {
-      buffered += decoder.decode(value, { stream: true });
-
-      let newlineIndex = buffered.indexOf('\n');
-      while (newlineIndex !== -1) {
-        const line = buffered.slice(0, newlineIndex).trim();
-        buffered = buffered.slice(newlineIndex + 1);
-        newlineIndex = buffered.indexOf('\n');
-
-        if (!line.startsWith('data:')) {
-          continue;
-        }
-        const payload = line.slice(5).trim();
-        if (payload === '[DONE]') {
-          return;
-        }
-        try {
-          const parsed = JSON.parse(payload) as {
-            choices?: { delta?: { content?: string } }[];
-          };
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
-            yield delta;
-          }
-        } catch {
-          // Ignore malformed keep-alive lines from the upstream stream.
+    let raw = '';
+    let shown = '';
+    try {
+      for await (const token of tokens) {
+        raw += token;
+        const safe = guard.push(token);
+        if (guard.leaked) break;
+        if (safe) {
+          shown += safe;
+          yield safe;
         }
       }
+      const rest = guard.flush();
+      if (rest) {
+        shown += rest;
+        yield rest;
+      }
+      if (guard.leaked) yield LEAK_NOTICE;
+    } finally {
+      await this.security.recordOutput(noteId, [...guard.findings], guard.leaked, raw);
     }
+
+    if (shown.trim() && !guard.leaked) {
+      await this.memory.addMessage(conversationId, 'assistant', shown);
+      this.memory.scheduleUpdate(conversationId);
+    }
+  }
+
+  private async retrieveChunks(noteId: string, questionVector: number[]): Promise<RetrievedChunk[]> {
+    const distance = cosineDistance(noteChunks.embedding, questionVector);
+    const rows = await this.db
+      .select({
+        id: noteChunks.id,
+        content: noteChunks.content,
+        embedding: noteChunks.embedding,
+        similarity: sql<number>`1 - (${distance})`.mapWith(Number),
+      })
+      .from(noteChunks)
+      .where(eq(noteChunks.noteId, noteId))
+      .orderBy(distance)
+      .limit(CANDIDATES);
+    // Um texto repetido muitas vezes na nota não pode ocupar todas as vagas do prompt.
+    return dropNearDuplicates(rows, TOP_K).map(({ embedding: _embedding, ...chunk }) => chunk);
   }
 }

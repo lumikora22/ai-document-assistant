@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "bookmark (pgvector)",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "bookmark",
+      "Username": "postgres",
+      "SSLMode": "prefer"
+    }
+  }
+}

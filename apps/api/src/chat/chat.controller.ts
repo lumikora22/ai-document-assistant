@@ -1,12 +1,16 @@
-import { BadRequestException, Body, Controller, HttpException, Post, Res } from '@nestjs/common';
+import { BadRequestException, Body, Controller, HttpException, Post, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
+import { LlmRateLimitGuard } from '../security/rate-limit.guard';
 import { ChatService } from './chat.service';
-import { ChatHistoryMessage } from './prompt';
 
+/**
+ * A "history" field sent by older clients is ignored: the conversation is
+ * read from the database so a client cannot forge assistant messages.
+ */
 interface ChatRequestBody {
-  documentId?: string;
+  noteId?: string;
   message?: string;
-  history?: ChatHistoryMessage[];
+  conversationId?: string;
 }
 
 @Controller('chat')
@@ -16,23 +20,25 @@ export class ChatController {
   /**
    * Streams the assistant answer over Server-Sent Events.
    *
-   * Event sequence: one "sources" event with the retrieved chunks, then a
+   * Event sequence: one "conversation" event with the id to send back on the
+   * next message, one "sources" event with the retrieved chunks, then a
    * series of "token" events, then a final "done" event. Errors after the
    * stream has started are delivered as an "error" event.
    */
   @Post()
+  @UseGuards(LlmRateLimitGuard)
   async chat(@Body() body: ChatRequestBody, @Res() res: Response): Promise<void> {
-    const { documentId, message } = body;
-    if (!documentId || typeof documentId !== 'string') {
-      throw new BadRequestException('documentId is required');
+    const { noteId, message } = body;
+    if (!noteId || typeof noteId !== 'string') {
+      throw new BadRequestException('noteId is required');
     }
     if (!message || typeof message !== 'string' || message.trim().length === 0) {
       throw new BadRequestException('message is required');
     }
-    const history = Array.isArray(body.history) ? body.history : [];
+    const conversationId = typeof body.conversationId === 'string' ? body.conversationId : undefined;
 
     // Errors thrown before the stream starts become regular JSON errors.
-    const stream = await this.chatService.ask(documentId, message.trim(), history).catch((error) => {
+    const stream = await this.chatService.ask(noteId, message.trim(), conversationId).catch((error) => {
       if (error instanceof HttpException) {
         throw error;
       }
@@ -45,10 +51,18 @@ export class ChatController {
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
 
+    this.writeEvent(res, 'conversation', { id: stream.conversationId });
     this.writeEvent(res, 'sources', stream.sources);
+
+    // Se o cliente fechar a aba, parar de ler cancela a requisição à OpenRouter e para de gastar tokens.
+    let closed = false;
+    res.on('close', () => {
+      closed = true;
+    });
 
     try {
       for await (const token of stream.tokens) {
+        if (closed) break;
         this.writeEvent(res, 'token', { content: token });
       }
       this.writeEvent(res, 'done', {});

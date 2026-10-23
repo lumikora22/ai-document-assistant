@@ -1,8 +1,8 @@
 {
-  "name": "@ai-document-assistant/web",
+  "name": "@bookmark/web",
   "version": "1.0.0",
   "private": true,
-  "description": "Next.js frontend: document upload, streaming chat, and source citations.",
+  "description": "aplicação front-end para visualização de anotações de histórias",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

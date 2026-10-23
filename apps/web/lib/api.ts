@@ -1,16 +1,44 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
+import type { ConversationMemory, GraphView, MemoryGraph } from './memory';
 
-export interface DocumentRecord {
+// Same-origin path proxied to the NestJS API by next.config.mjs. Set
+// NEXT_PUBLIC_API_URL only to bypass the proxy and call the API directly.
+const API_URL = (process.env.NEXT_PUBLIC_API_URL || '/api').replace(/\/+$/, '');
+
+export const NOTE_TYPES = [
+  'game_story',
+  'study',
+  'book',
+  'movie_series',
+  'work',
+  'personal',
+  'other',
+] as const;
+
+export type NoteType = (typeof NOTE_TYPES)[number];
+
+export interface NoteEntry {
   id: string;
-  filename: string;
-  pages: number;
-  chunks: number;
+  content: string;
   createdAt: string;
+}
+
+export interface NoteRecord {
+  id: string;
+  title: string;
+  type: NoteType;
+  content: string;
+  entries: NoteEntry[];
+  createdAt: string;
+}
+
+export interface NewNote {
+  title: string;
+  type: NoteType;
+  content: string;
 }
 
 export interface ChatSource {
   id: string;
-  page: number;
   content: string;
   similarity: number;
 }
@@ -32,26 +60,56 @@ async function parseError(response: Response): Promise<string> {
   return `Request failed with status ${response.status}`;
 }
 
-export async function listDocuments(): Promise<DocumentRecord[]> {
-  const response = await fetch(`${API_URL}/documents`);
+export async function listNotes(): Promise<NoteRecord[]> {
+  const response = await fetch(`${API_URL}/notes`);
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }
 
-export async function uploadDocument(file: File): Promise<DocumentRecord> {
-  const form = new FormData();
-  form.append('file', file);
-  const response = await fetch(`${API_URL}/documents`, { method: 'POST', body: form });
+export async function createNote(note: NewNote): Promise<NoteRecord> {
+  const response = await fetch(`${API_URL}/notes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(note),
+  });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }
 
-export async function deleteDocument(id: string): Promise<void> {
-  const response = await fetch(`${API_URL}/documents/${id}`, { method: 'DELETE' });
+export async function addNoteEntry(id: string, content: string): Promise<NoteRecord> {
+  const response = await fetch(`${API_URL}/notes/${id}/entries`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
   if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function deleteNote(id: string): Promise<void> {
+  const response = await fetch(`${API_URL}/notes/${id}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(await parseError(response));
+}
+
+/** Memories built from past conversations; limited to one note when noteId is given. */
+export async function listMemories(noteId?: string): Promise<ConversationMemory[]> {
+  const query = noteId ? `?noteId=${encodeURIComponent(noteId)}` : '';
+  const response = await fetch(`${API_URL}/memory${query}`);
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+/** One of the conversation graphs (entities or RAG), optionally for a single note. */
+export async function getMemoryGraph(view: GraphView, noteId?: string): Promise<MemoryGraph> {
+  const query = noteId ? `?noteId=${encodeURIComponent(noteId)}` : '';
+  const response = await fetch(`${API_URL}/memory/graph/${view}${query}`);
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
 }
 
 export interface ChatStreamHandlers {
+  /** Id of the conversation the API saved the exchange to; send it back with the next message. */
+  onConversation: (conversationId: string) => void;
   onSources: (sources: ChatSource[]) => void;
   onToken: (token: string) => void;
   onDone: () => void;
@@ -61,19 +119,21 @@ export interface ChatStreamHandlers {
 /**
  * Sends a chat request and consumes the SSE response stream.
  *
- * The API emits: one "sources" event, a series of "token" events, and a
- * final "done" event. Server-side failures mid-stream arrive as "error".
+ * The API emits: one "conversation" event, one "sources" event, a series of
+ * "token" events, and a final "done" event. Server-side failures mid-stream
+ * arrive as "error".
  */
 export async function streamChat(
-  documentId: string,
+  noteId: string,
   message: string,
   history: ChatHistoryMessage[],
+  conversationId: string | null,
   handlers: ChatStreamHandlers,
 ): Promise<void> {
   const response = await fetch(`${API_URL}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ documentId, message, history }),
+    body: JSON.stringify({ noteId, message, history, conversationId }),
   });
 
   if (!response.ok || !response.body) {
@@ -95,7 +155,9 @@ export async function streamChat(
     if (dataLines.length === 0) return;
     const data = dataLines.join('\n');
 
-    if (event === 'sources') {
+    if (event === 'conversation') {
+      handlers.onConversation((JSON.parse(data) as { id: string }).id);
+    } else if (event === 'sources') {
       handlers.onSources(JSON.parse(data) as ChatSource[]);
     } else if (event === 'token') {
       handlers.onToken((JSON.parse(data) as { content: string }).content);

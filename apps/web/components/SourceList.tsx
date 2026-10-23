@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import type { ChatSource } from '../lib/api';
+import { useI18n } from '../lib/i18n';
 
 interface SourceListProps {
   sources: ChatSource[];
@@ -9,6 +10,7 @@ interface SourceListProps {
 
 export function SourceList({ sources }: SourceListProps) {
   const [open, setOpen] = useState(false);
+  const { t } = useI18n();
 
   if (sources.length === 0) return null;
 
@@ -20,7 +22,7 @@ export function SourceList({ sources }: SourceListProps) {
         aria-expanded={open}
         className="text-xs font-medium text-accent hover:underline dark:text-indigo-400"
       >
-        {open ? 'Hide sources' : `Sources (${sources.length})`}
+        {open ? t.hideSources : t.sources(sources.length)}
       </button>
       {open && (
         <ul className="mt-2 space-y-2">
@@ -30,10 +32,8 @@ export function SourceList({ sources }: SourceListProps) {
               className="rounded-md bg-zinc-100 p-2 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
             >
               <div className="mb-1 flex items-center justify-between font-medium text-zinc-500 dark:text-zinc-400">
-                <span>
-                  Excerpt {index + 1} &middot; page {source.page}
-                </span>
-                <span>{Math.max(0, Math.min(1, source.similarity) * 100).toFixed(0)}% match</span>
+                <span>{t.excerpt(index + 1)}</span>
+                <span>{t.match(Math.max(0, Math.min(1, source.similarity) * 100).toFixed(0))}</span>
               </div>
               <p className="line-clamp-4 break-words">{source.content}</p>
             </li>

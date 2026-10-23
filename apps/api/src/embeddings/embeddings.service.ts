@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { assertValidEmbedding } from '../security/embedding-guard';
+import { sanitizeText } from '../security/sanitize';
 
 /**
  * Minimal shape of the feature-extraction pipeline returned by
@@ -19,9 +21,19 @@ const MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
  * on disk, so no external embedding API is required.
  */
 @Injectable()
-export class EmbeddingsService {
+export class EmbeddingsService implements OnApplicationBootstrap {
   private readonly logger = new Logger(EmbeddingsService.name);
   private pipelinePromise?: Promise<FeatureExtractionPipeline>;
+
+  /**
+   * Starts loading the model as soon as the API is up, without blocking
+   * startup, so the first note saved does not pay the ~3s load time.
+   */
+  onApplicationBootstrap(): void {
+    this.loadPipeline().catch((error) =>
+      this.logger.error(`Failed to preload embedding model: ${error}`),
+    );
+  }
 
   private loadPipeline(): Promise<FeatureExtractionPipeline> {
     if (!this.pipelinePromise) {
@@ -36,18 +48,30 @@ export class EmbeddingsService {
       this.pipelinePromise = importEsm('@xenova/transformers').then((transformers) =>
         transformers.pipeline('feature-extraction', MODEL_ID),
       );
+      // A failed load (e.g. no network on the first download) is retried on the next call.
+      this.pipelinePromise.catch(() => {
+        this.pipelinePromise = undefined;
+      });
     }
     return this.pipelinePromise;
   }
 
-  /** Embeds a batch of texts. Returns one 384-dimensional vector per text. */
+  /**
+   * Embeds a batch of texts. Returns one 384-dimensional vector per text.
+   *
+   * Invisible characters are stripped first so hidden text cannot steer what
+   * a chunk is retrieved for, and every vector is validated before it can
+   * reach pgvector.
+   */
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) {
       return [];
     }
     const pipeline = await this.loadPipeline();
-    const output = await pipeline(texts, { pooling: 'mean', normalize: true });
-    return output.tolist();
+    const output = await pipeline(texts.map(sanitizeText), { pooling: 'mean', normalize: true });
+    const vectors = output.tolist();
+    vectors.forEach((vector) => assertValidEmbedding(vector));
+    return vectors;
   }
 
   /** Embeds a single text. */

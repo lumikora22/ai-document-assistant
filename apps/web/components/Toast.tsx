@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { useI18n } from '../lib/i18n';
 
 export interface ToastMessage {
   id: number;
@@ -13,6 +14,7 @@ interface ToastProps {
 }
 
 export function Toast({ toast, onDismiss }: ToastProps) {
+  const { t } = useI18n();
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(onDismiss, 5000);
@@ -31,7 +33,7 @@ export function Toast({ toast, onDismiss }: ToastProps) {
         <button
           type="button"
           onClick={onDismiss}
-          aria-label="Dismiss notification"
+          aria-label={t.dismiss}
           className="shrink-0 font-medium opacity-60 hover:opacity-100"
         >
           &times;
